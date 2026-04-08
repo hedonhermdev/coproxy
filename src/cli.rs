@@ -81,6 +81,10 @@ pub struct ServeArgs {
     /// Skip automatic first-run login check
     #[arg(long)]
     pub no_auto_login: bool,
+
+    /// Run the server as a background daemon
+    #[arg(short = 'd', long)]
+    pub daemon: bool,
 }
 
 #[derive(Debug, Subcommand)]

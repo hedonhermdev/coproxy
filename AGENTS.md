@@ -7,6 +7,7 @@
 
 ## Commands (no task runner wrappers)
 - Start server: `cargo run -- serve --host 127.0.0.1 --port 8080`
+- Start server as daemon: `cargo run -- serve -d` (re-execs detached, writes PID to `<state-dir>/coproxy.pid`)
 - Auth lifecycle: `cargo run -- auth login`, `cargo run -- auth status`, `cargo run -- auth logout`
 - Model listing CLI: `cargo run -- models --json`
 - Focused verification: `cargo fmt --all -- --check`, `cargo clippy --all-targets`, `cargo test`, `cargo check`

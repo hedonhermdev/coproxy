@@ -57,6 +57,10 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!("--host must not be empty");
             }
 
+            if args.daemon {
+                return daemonize(&store);
+            }
+
             let provider = GhcpProvider::new(store, cli.github_token);
             if !args.no_auto_login {
                 let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
@@ -76,3 +80,43 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+/// Re-exec the current binary with the same arguments but without `-d`/`--daemon`,
+/// detach the child process, write its PID to `<state-dir>/coproxy.pid`, and exit.
+fn daemonize(store: &TokenStore) -> anyhow::Result<()> {
+    use std::fs;
+    use std::process::{Command as Cmd, Stdio};
+
+    let exe = std::env::current_exe().context("failed to determine current executable path")?;
+
+    // Rebuild args, stripping -d / --daemon.
+    let args: Vec<String> = std::env::args()
+        .skip(1) // skip argv[0]
+        .filter(|a| a != "-d" && a != "--daemon")
+        .collect();
+
+    let child = Cmd::new(&exe)
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("failed to spawn daemon child process")?;
+
+    let pid = child.id();
+
+    // Write PID file next to the auth/ dir (i.e. in the state dir root).
+    let pid_path = store
+        .root_dir()
+        .parent()
+        .map(|p| p.join("coproxy.pid"))
+        .unwrap_or_else(|| store.root_dir().join("coproxy.pid"));
+    fs::write(&pid_path, pid.to_string())
+        .with_context(|| format!("failed to write PID file at {}", pid_path.display()))?;
+
+    println!("Server started in background (pid {pid})");
+    println!("PID file: {}", pid_path.display());
+    Ok(())
+}
+
+use anyhow::Context;
