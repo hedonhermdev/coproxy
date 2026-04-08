@@ -1,0 +1,29 @@
+[Unit]
+Description=coproxy - OpenAI-compatible API proxy for GitHub Copilot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/coproxy serve --host 127.0.0.1 --port 8080 --api-surface all --no-auto-login
+Restart=on-failure
+RestartSec=5
+
+# Auth: set GHCP_GITHUB_TOKEN or run `coproxy auth login` first
+Environment=RUST_LOG=info
+#Environment=GHCP_GITHUB_TOKEN=ghp_xxxxx
+#Environment=GHCP_PROXY_API_KEY=your-secret-key
+
+# State directory for cached tokens
+StateDirectory=coproxy
+Environment=HOME=/var/lib/coproxy
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/coproxy
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

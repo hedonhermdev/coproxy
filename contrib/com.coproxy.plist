@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.coproxy</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/coproxy</string>
+        <string>serve</string>
+        <string>--host</string>
+        <string>127.0.0.1</string>
+        <string>--port</string>
+        <string>8080</string>
+        <string>--api-surface</string>
+        <string>all</string>
+        <string>--no-auto-login</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>info</string>
+        <!-- Uncomment and set your GitHub token to skip device flow -->
+        <!-- <key>GHCP_GITHUB_TOKEN</key> -->
+        <!-- <string>ghp_xxxxx</string> -->
+        <!-- <key>GHCP_PROXY_API_KEY</key> -->
+        <!-- <string>your-secret-key</string> -->
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/coproxy.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/coproxy.stderr.log</string>
+</dict>
+</plist>
