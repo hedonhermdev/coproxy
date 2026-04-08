@@ -226,22 +226,22 @@ impl GhcpProvider {
     async fn resolve_ghcp_token(&self, allow_device_login: bool) -> anyhow::Result<CachedToken> {
         let mut lock = self.cached_ghcp_token.lock().await;
 
-        if let Some(cached) = lock.as_ref() {
-            if is_token_fresh(cached.expires_at) {
-                return Ok(cached.clone());
-            }
+        if let Some(cached) = lock.as_ref()
+            && is_token_fresh(cached.expires_at)
+        {
+            return Ok(cached.clone());
         }
 
-        if let Some(stored) = self.store.load_ghcp_token().await? {
-            if is_token_fresh(stored.expires_at) {
-                let cached = CachedToken {
-                    token: stored.token,
-                    expires_at: stored.expires_at,
-                    api_endpoint: stored.api_endpoint,
-                };
-                *lock = Some(cached.clone());
-                return Ok(cached);
-            }
+        if let Some(stored) = self.store.load_ghcp_token().await?
+            && is_token_fresh(stored.expires_at)
+        {
+            let cached = CachedToken {
+                token: stored.token,
+                expires_at: stored.expires_at,
+                api_endpoint: stored.api_endpoint,
+            };
+            *lock = Some(cached.clone());
+            return Ok(cached);
         }
 
         let github_access_token = self.resolve_github_access_token(allow_device_login).await?;
@@ -745,10 +745,10 @@ fn build_upstream_url(
         }
     }
 
-    if let Some(query) = raw_query {
-        if !query.trim().is_empty() {
-            url.set_query(Some(query));
-        }
+    if let Some(query) = raw_query
+        && !query.trim().is_empty()
+    {
+        url.set_query(Some(query));
     }
 
     Ok(url)
