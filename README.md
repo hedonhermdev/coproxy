@@ -124,6 +124,8 @@ for model in client.models.list():
 |---|---|---|
 | `--host` | `127.0.0.1` | Bind address |
 | `--port` | `8080` | Bind port |
+| `-d`, `--daemon` | false | Run the server as a background daemon |
+| `--stop` | false | Stop a running daemon |
 | `--api-surface` | `chat` | API surface: `chat`, `chat-responses`, `chat-embeddings`, `all` |
 | `--api-key` | none | Require Bearer token for `/v1/*` routes |
 | `--default-model` | `gpt-4o` | Default model when requests omit `model` |
@@ -158,6 +160,18 @@ Or skip device flow entirely by providing a GitHub token:
 ```bash
 export GHCP_GITHUB_TOKEN=ghp_xxxxx
 coproxy serve
+```
+
+## Running as a daemon
+
+Use `-d` to start the server in the background. The daemon's PID is written to `<state-dir>/coproxy.pid`.
+
+```bash
+# Start in background
+coproxy serve -d --port 8080
+
+# Stop the daemon
+coproxy serve --stop
 ```
 
 ## Running as a service
