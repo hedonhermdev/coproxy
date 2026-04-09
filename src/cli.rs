@@ -83,8 +83,12 @@ pub struct ServeArgs {
     pub no_auto_login: bool,
 
     /// Run the server as a background daemon
-    #[arg(short = 'd', long)]
+    #[arg(short = 'd', long, conflicts_with = "stop")]
     pub daemon: bool,
+
+    /// Stop a running daemon
+    #[arg(long)]
+    pub stop: bool,
 }
 
 #[derive(Debug, Subcommand)]
