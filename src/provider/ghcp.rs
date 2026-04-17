@@ -31,6 +31,7 @@ struct CachedToken {
 #[derive(Clone, Debug)]
 struct CachedModels {
     models: Vec<String>,
+    details: Vec<ModelDetails>,
     fetched_at: i64,
 }
 
@@ -84,12 +85,25 @@ struct UpstreamModelsResponse {
     data: Vec<UpstreamModel>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct UpstreamModel {
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
     model_picker_enabled: Option<bool>,
+    /// Preserve every other field GHCP returns so verbose/JSON output can surface
+    /// details like vendor, version, capabilities, limits, tokenizer, etc.
+    #[serde(flatten)]
+    extra: serde_json::Map<String, Value>,
+}
+
+/// Full details for a single model, suitable for `coproxy models --verbose`
+/// and for `--json` output. `raw` carries every field GHCP returned so callers
+/// can display or forward data this crate does not explicitly model.
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelDetails {
+    pub id: String,
+    pub raw: serde_json::Map<String, Value>,
 }
 
 impl GhcpProvider {
@@ -134,20 +148,12 @@ impl GhcpProvider {
         &self,
         default_model: Option<&str>,
     ) -> Result<Vec<String>, ProviderError> {
-        if let Some(cached) = self.cached_models_if_fresh().await {
+        if let Some((cached, _)) = self.cached_models_if_fresh().await {
             return Ok(merge_with_default(cached, default_model));
         }
 
         match self.fetch_models_from_upstream().await {
-            Ok(models) => {
-                let now = chrono::Utc::now().timestamp();
-                let mut lock = self.cached_model_list.lock().await;
-                *lock = Some(CachedModels {
-                    models: models.clone(),
-                    fetched_at: now,
-                });
-                Ok(merge_with_default(models, default_model))
-            }
+            Ok((models, _)) => Ok(merge_with_default(models, default_model)),
             Err(error) => {
                 tracing::warn!("Falling back to static model catalog: {}", error);
                 Ok(self.model_catalog(default_model))
@@ -155,17 +161,30 @@ impl GhcpProvider {
         }
     }
 
-    async fn cached_models_if_fresh(&self) -> Option<Vec<String>> {
+    /// Returns full GHCP model details. Unlike `list_available_models`, this
+    /// does not fall back to the static catalog because the static list does
+    /// not carry capability metadata — callers get the upstream error instead.
+    pub async fn list_model_details(&self) -> Result<Vec<ModelDetails>, ProviderError> {
+        if let Some((_, details)) = self.cached_models_if_fresh().await {
+            return Ok(details);
+        }
+        let (_, details) = self.fetch_models_from_upstream().await?;
+        Ok(details)
+    }
+
+    async fn cached_models_if_fresh(&self) -> Option<(Vec<String>, Vec<ModelDetails>)> {
         let lock = self.cached_model_list.lock().await;
         let cached = lock.as_ref()?;
         let now = chrono::Utc::now().timestamp();
         if now - cached.fetched_at > 300 {
             return None;
         }
-        Some(cached.models.clone())
+        Some((cached.models.clone(), cached.details.clone()))
     }
 
-    async fn fetch_models_from_upstream(&self) -> Result<Vec<String>, ProviderError> {
+    async fn fetch_models_from_upstream(
+        &self,
+    ) -> Result<(Vec<String>, Vec<ModelDetails>), ProviderError> {
         let creds = self
             .resolve_ghcp_token(false)
             .await
@@ -210,17 +229,37 @@ impl GhcpProvider {
                 ProviderError::Upstream(format!("failed parsing GHCP models response: {error}"))
             })?;
 
-        let mut models = parsed
+        let details: Vec<ModelDetails> = parsed
             .data
             .into_iter()
             .filter(|entry| !matches!(entry.model_picker_enabled, Some(false)))
-            .filter_map(|entry| entry.id)
-            .collect::<Vec<_>>();
+            .filter_map(|entry| {
+                let id = entry.id.clone()?;
+                let mut raw = entry.extra.clone();
+                // Re-insert `id` and `model_picker_enabled` into `raw` so the
+                // flattened map represents the full upstream object.
+                raw.insert("id".to_string(), Value::String(id.clone()));
+                if let Some(enabled) = entry.model_picker_enabled {
+                    raw.insert("model_picker_enabled".to_string(), Value::Bool(enabled));
+                }
+                Some(ModelDetails { id, raw })
+            })
+            .collect();
 
+        let mut models: Vec<String> = details.iter().map(|d| d.id.clone()).collect();
         models.extend(self.model_catalog(None));
         models.sort();
         models.dedup();
-        Ok(models)
+
+        let now = chrono::Utc::now().timestamp();
+        let mut lock = self.cached_model_list.lock().await;
+        *lock = Some(CachedModels {
+            models: models.clone(),
+            details: details.clone(),
+            fetched_at: now,
+        });
+
+        Ok((models, details))
     }
 
     async fn resolve_ghcp_token(&self, allow_device_login: bool) -> anyhow::Result<CachedToken> {

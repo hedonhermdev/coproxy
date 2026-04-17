@@ -1,7 +1,7 @@
 use clap::Parser;
 use coproxy::auth::token_store::TokenStore;
 use coproxy::cli::{AuthCommand, Cli, Command};
-use coproxy::provider::ghcp::GhcpProvider;
+use coproxy::provider::ghcp::{GhcpProvider, ModelDetails};
 use coproxy::server::{ServerConfig, run};
 use std::io::IsTerminal;
 use tracing_subscriber::EnvFilter;
@@ -40,13 +40,27 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Command::Models { json } => {
+        Command::Models { json, verbose } => {
             let provider = GhcpProvider::new(store, cli.github_token);
-            let models = provider.list_available_models(None).await?;
 
             if json {
-                println!("{}", serde_json::to_string_pretty(&models)?);
+                // JSON always carries full upstream details.
+                let details = provider.list_model_details().await?;
+                let values: Vec<serde_json::Value> = details
+                    .into_iter()
+                    .map(|d| serde_json::Value::Object(d.raw))
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&values)?);
+            } else if verbose {
+                let details = provider.list_model_details().await?;
+                for (idx, detail) in details.iter().enumerate() {
+                    if idx > 0 {
+                        println!();
+                    }
+                    print_model_details(detail);
+                }
             } else {
+                let models = provider.list_available_models(None).await?;
                 for model in models {
                     println!("{model}");
                 }
@@ -171,3 +185,84 @@ fn pid_file_path(store: &TokenStore) -> std::path::PathBuf {
 }
 
 use anyhow::Context;
+
+/// Render a single model's details to stdout in a human-readable block.
+/// Prefers well-known GHCP fields (vendor, version, capabilities.limits,
+/// capabilities.supports, tokenizer) and falls back to `key: <json>` for any
+/// other top-level fields so nothing upstream goes hidden.
+fn print_model_details(detail: &ModelDetails) {
+    use serde_json::Value;
+
+    let raw = &detail.raw;
+    println!("{}", detail.id);
+
+    // Surface a short list of commonly-useful top-level scalars first.
+    const HEADLINE_KEYS: &[&str] = &["name", "vendor", "version", "object", "preview"];
+    for key in HEADLINE_KEYS {
+        if let Some(value) = raw.get(*key)
+            && let Some(rendered) = render_scalar(value)
+        {
+            println!("  {key}: {rendered}");
+        }
+    }
+
+    // Capabilities: nested object with `family`, `type`, `tokenizer`, `limits`, `supports`.
+    if let Some(Value::Object(caps)) = raw.get("capabilities") {
+        println!("  capabilities:");
+        for key in ["family", "type", "tokenizer"] {
+            if let Some(v) = caps.get(key).and_then(render_scalar) {
+                println!("    {key}: {v}");
+            }
+        }
+        if let Some(Value::Object(limits)) = caps.get("limits") {
+            println!("    limits:");
+            for (k, v) in limits {
+                if let Some(rendered) = render_scalar(v) {
+                    println!("      {k}: {rendered}");
+                } else {
+                    println!("      {k}: {v}");
+                }
+            }
+        }
+        if let Some(Value::Object(supports)) = caps.get("supports") {
+            let enabled: Vec<&str> = supports
+                .iter()
+                .filter_map(|(k, v)| (v.as_bool() == Some(true)).then_some(k.as_str()))
+                .collect();
+            if !enabled.is_empty() {
+                println!("    supports: {}", enabled.join(", "));
+            }
+        }
+    }
+
+    // Anything else at the top level that we did not explicitly render above.
+    let handled: &[&str] = &[
+        "id",
+        "name",
+        "vendor",
+        "version",
+        "object",
+        "preview",
+        "capabilities",
+    ];
+    for (key, value) in raw {
+        if handled.contains(&key.as_str()) {
+            continue;
+        }
+        match render_scalar(value) {
+            Some(rendered) => println!("  {key}: {rendered}"),
+            None => println!("  {key}: {value}"),
+        }
+    }
+}
+
+fn render_scalar(value: &serde_json::Value) -> Option<String> {
+    use serde_json::Value;
+    match value {
+        Value::Null => None,
+        Value::String(s) => Some(s.clone()),
+        Value::Bool(b) => Some(b.to_string()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}

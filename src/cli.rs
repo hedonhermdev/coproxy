@@ -33,6 +33,11 @@ pub enum Command {
         /// Output as JSON array
         #[arg(long)]
         json: bool,
+
+        /// Show full model details (context window, capabilities, vendor, etc.).
+        /// With `--json`, full details are always emitted regardless of this flag.
+        #[arg(long, short = 'v')]
+        verbose: bool,
     },
 }
 
