@@ -113,11 +113,22 @@ fn daemonize(store: &TokenStore) -> anyhow::Result<()> {
         .filter(|a| a != "-d" && a != "--daemon")
         .collect();
 
-    let child = Cmd::new(&exe)
-        .args(&args)
+    let mut cmd = Cmd::new(&exe);
+    cmd.args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+
+    // Detach the child from the caller's console so closing the shell window
+    // doesn't cascade a CTRL_CLOSE_EVENT into the daemon.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        cmd.creation_flags(DETACHED_PROCESS);
+    }
+
+    let child = cmd
         .spawn()
         .context("failed to spawn daemon child process")?;
 
@@ -132,7 +143,11 @@ fn daemonize(store: &TokenStore) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Read the PID from `<state-dir>/coproxy.pid`, send SIGTERM, and remove the PID file.
+/// Read the PID from `<state-dir>/coproxy.pid`, terminate the daemon, and remove the PID file.
+///
+/// Unix: sends SIGTERM so the server's `shutdown_signal` handler drains gracefully.
+/// Windows: invokes `taskkill /F /PID <pid>` (hard kill). The proxy holds no durable
+/// state across requests, so in-flight requests being dropped is acceptable.
 fn stop_daemon(store: &TokenStore) -> anyhow::Result<()> {
     use std::fs;
 
@@ -153,6 +168,7 @@ fn stop_daemon(store: &TokenStore) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         use std::io;
+
         // Send SIGTERM for graceful shutdown (matches the server's shutdown_signal handler).
         let ret = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
         if ret != 0 {
@@ -164,16 +180,44 @@ fn stop_daemon(store: &TokenStore) -> anyhow::Result<()> {
             }
             return Err(err).context(format!("failed to send SIGTERM to pid {pid}"));
         }
+
+        fs::remove_file(&pid_path).ok();
+        println!("Sent SIGTERM to daemon (pid {pid})");
+        Ok(())
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        anyhow::bail!("--stop is only supported on Unix platforms");
+        use std::process::{Command as Cmd, Stdio};
+
+        let output = Cmd::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .context("failed to invoke taskkill")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // taskkill exits 128 with "not found" / "not running" when the PID is gone.
+            let not_found = stderr.contains("not found") || stderr.contains("not running");
+            if not_found {
+                fs::remove_file(&pid_path).ok();
+                anyhow::bail!("process {pid} not found (stale PID file removed)");
+            }
+            anyhow::bail!("taskkill failed for pid {pid}: {}", stderr.trim());
+        }
+
+        fs::remove_file(&pid_path).ok();
+        println!("Terminated daemon (pid {pid})");
+        Ok(())
     }
 
-    fs::remove_file(&pid_path).ok();
-    println!("Sent SIGTERM to daemon (pid {pid})");
-    Ok(())
+    #[cfg(not(any(unix, windows)))]
+    {
+        anyhow::bail!("--stop is not supported on this platform (pid {pid})");
+    }
 }
 
 fn pid_file_path(store: &TokenStore) -> std::path::PathBuf {
