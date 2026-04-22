@@ -37,7 +37,7 @@ cargo install --path .
 
 ### Prebuilt binaries
 
-Download from [GitHub Releases](https://github.com/hedonhermdev/coproxy/releases). Available for Linux (x86_64, aarch64) and macOS (x86_64, aarch64).
+Download from [GitHub Releases](https://github.com/hedonhermdev/coproxy/releases). Available for Linux (x86_64, aarch64), macOS (x86_64, aarch64), and Windows (x86_64, aarch64). Linux/macOS builds ship as `.tar.gz`, Windows builds as `.zip`.
 
 ### Docker
 
@@ -174,6 +174,8 @@ coproxy serve -d --port 8080
 coproxy serve --stop
 ```
 
+On Unix, `--stop` sends `SIGTERM` so the server drains in-flight requests before exiting. On Windows it invokes `taskkill /F /PID <pid>`, which terminates immediately — in-flight requests are dropped. The proxy holds no durable cross-request state, so this is normally fine; avoid `--stop` mid-conversation if a streaming response is important to preserve.
+
 ## Running as a service
 
 ### systemd (Linux)
@@ -194,6 +196,27 @@ Copy `contrib/com.coproxy.plist` to `~/Library/LaunchAgents/`:
 cp contrib/com.coproxy.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.coproxy.plist
 ```
+
+### Task Scheduler (Windows)
+
+Register a per-user task that starts the proxy at logon. Run from PowerShell:
+
+```powershell
+$exe = "$env:USERPROFILE\.cargo\bin\coproxy.exe"  # or the path to your extracted release binary
+$action   = New-ScheduledTaskAction -Execute $exe -Argument 'serve --host 127.0.0.1 --port 8080 --api-surface all --no-auto-login'
+$trigger  = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+Register-ScheduledTask -TaskName 'coproxy' -Action $action -Trigger $trigger -Settings $settings
+```
+
+Notes:
+
+- Do **not** pass `-d`/`--daemon` — Task Scheduler already runs the task detached from any console.
+- Run `coproxy auth login` once interactively before registering the task, or set `GHCP_GITHUB_TOKEN` via `[System.Environment]::SetEnvironmentVariable('GHCP_GITHUB_TOKEN', 'ghp_xxxxx', 'User')` so the task can authenticate without prompting.
+- Start/stop on demand: `Start-ScheduledTask -TaskName coproxy` / `Stop-ScheduledTask -TaskName coproxy`.
+- Remove entirely: `Unregister-ScheduledTask -TaskName coproxy -Confirm:$false`.
+
+For Windows Service semantics (auto-restart, logs to Event Log, runs without a logged-in user) use a wrapper like [NSSM](https://nssm.cc/) — coproxy is a console app, not a native Windows service, so it can't be registered with `sc create` directly.
 
 ## Development
 
