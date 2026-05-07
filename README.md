@@ -1,6 +1,6 @@
 # coproxy
 
-OpenAI-compatible API proxy backed by GitHub Copilot.
+OpenAI- and Anthropic-compatible API proxy backed by GitHub Copilot.
 
 > [!WARNING]
 > This is a reverse-engineered proxy of GitHub Copilot API. It is not supported by GitHub, and may break unexpectedly. Use at your own risk.
@@ -115,6 +115,37 @@ for model in client.models.list():
 | `POST /v1/responses` | Passthrough (model-dependent) |
 | `GET /v1/responses/{response_id}` | Passthrough |
 | `POST /v1/embeddings` | Not supported |
+| `POST /v1/messages` | Anthropic-compatible (opt in via `--anthropic`) |
+
+### Anthropic-compatible Messages API
+
+`/v1/messages` is **disabled by default** and only exposed when the server is
+started with `--anthropic`. The proxy translates each Anthropic Messages
+request into an OpenAI chat completion (system blocks, content blocks, tool
+definitions, tool_use / tool_result, image inputs), dispatches to GHCP, and
+re-shapes the response back into Anthropic format. Streaming requests are
+re-emitted as Anthropic SSE events (`message_start`, `content_block_start`,
+`content_block_delta`, `content_block_stop`, `message_delta`, `message_stop`,
+`ping`).
+
+```bash
+coproxy serve --port 8080 --anthropic --api-key my-secret
+```
+
+```python
+from anthropic import Anthropic
+
+client = Anthropic(api_key="my-secret", base_url="http://127.0.0.1:8080")
+
+message = client.messages.create(
+    model="claude-3.5-sonnet",
+    max_tokens=256,
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+print(message.content[0].text)
+```
+
+You can also point Claude Code at the proxy: `ANTHROPIC_BASE_URL=http://127.0.0.1:8080 ANTHROPIC_API_KEY=my-secret claude`.
 
 ## Configuration
 
@@ -126,8 +157,9 @@ for model in client.models.list():
 | `--port` | `8080` | Bind port |
 | `-d`, `--daemon` | false | Run the server as a background daemon |
 | `--stop` | false | Stop a running daemon |
-| `--api-surface` | `chat` | API surface: `chat`, `chat-responses`, `chat-embeddings`, `all` |
-| `--api-key` | none | Require Bearer token for `/v1/*` routes |
+| `--api-surface` | `chat` | OpenAI surface: `chat`, `chat-responses`, `chat-embeddings`, `all` |
+| `--anthropic` | false | Also expose the Anthropic-compatible `POST /v1/messages` endpoint |
+| `--api-key` | none | Require Bearer token (or `x-api-key` for `/v1/messages`) for `/v1/*` routes |
 | `--default-model` | `gpt-4o` | Default model when requests omit `model` |
 | `--state-dir` | OS default | Override credential storage path |
 | `--no-auto-login` | false | Skip automatic auth bootstrap at startup |
@@ -228,6 +260,9 @@ cargo test                    # Rust tests
 
 # OpenAI compatibility tests (requires uv + GHCP auth)
 scripts/run-openai-compat-tests.sh
+
+# Anthropic compatibility tests (requires uv + GHCP auth)
+scripts/run-anthropic-compat-tests.sh
 ```
 
 ## License

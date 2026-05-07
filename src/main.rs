@@ -91,6 +91,7 @@ async fn main() -> anyhow::Result<()> {
                 api_surface: args.api_surface,
                 api_key: args.api_key,
                 default_model: args.default_model,
+                anthropic_enabled: args.anthropic,
             };
             run(cfg, provider).await?;
         }

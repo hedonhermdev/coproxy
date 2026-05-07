@@ -89,6 +89,34 @@ def test_responses_streaming_response_create_supported_or_model_gated(
     assert cast(Any, http_response.is_closed) is True
 
 
+def test_responses_image_input(
+    client: OpenAI,
+    responses_image_model_available: bool,
+    responses_image_model: str,
+    image_png_b64: str,
+) -> None:
+    if not responses_image_model_available:
+        pytest.skip(
+            f"Skipping responses image input test: model {responses_image_model!r} "
+            "is unavailable (GHCP auth, vision capability, or upstream support)"
+        )
+
+    data_url = f"data:image/png;base64,{image_png_b64}"
+    response = client.responses.create(
+        model=responses_image_model,
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "Describe this image briefly."},
+                    {"type": "input_image", "image_url": data_url},
+                ],
+            }
+        ],
+    )
+    _assert_response_shape(response, responses_image_model)
+
+
 def test_responses_retrieve_not_found_or_not_supported(client: OpenAI) -> None:
     with pytest.raises(APIStatusError) as exc_info:
         client.responses.retrieve("resp_compat_test")

@@ -14,11 +14,13 @@ pub struct ServerConfig {
     pub api_surface: ApiSurface,
     pub api_key: Option<String>,
     pub default_model: Option<String>,
+    /// When true, expose POST /v1/messages (Anthropic Messages API).
+    pub anthropic_enabled: bool,
 }
 
 pub async fn run(config: ServerConfig, provider: GhcpProvider) -> anyhow::Result<()> {
     let state = AppState::new(provider, config.api_key, config.default_model);
-    let app = app_router(config.api_surface, state);
+    let app = app_router(config.api_surface, config.anthropic_enabled, state);
 
     let bind_addr = format!("{}:{}", config.host, config.port);
     let listener = TcpListener::bind(&bind_addr).await?;
@@ -34,7 +36,7 @@ pub async fn run(config: ServerConfig, provider: GhcpProvider) -> anyhow::Result
     Ok(())
 }
 
-fn app_router(api_surface: ApiSurface, state: AppState) -> Router {
+fn app_router(api_surface: ApiSurface, anthropic_enabled: bool, state: AppState) -> Router {
     let mut app = Router::new()
         .route("/healthz", axum::routing::get(routes::health::healthz))
         .route(
@@ -66,6 +68,13 @@ fn app_router(api_surface: ApiSurface, state: AppState) -> Router {
         app = app.route(
             "/v1/embeddings",
             axum::routing::post(routes::embeddings::create_embeddings),
+        );
+    }
+
+    if anthropic_enabled {
+        app = app.route(
+            "/v1/messages",
+            axum::routing::post(routes::messages::create_message),
         );
     }
 

@@ -6,13 +6,12 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TESTS_DIR="$ROOT_DIR/tests"
 
 HOST="${GHCP_TEST_HOST:-127.0.0.1}"
-PORT="${GHCP_TEST_PORT:-4010}"
-API_SURFACE="${GHCP_TEST_API_SURFACE:-all}"
+PORT="${GHCP_TEST_ANTHROPIC_PORT:-4011}"
 API_KEY="${TEST_API_KEY:-compat-test-key}"
-BASE_URL="${TEST_API_BASE_URL:-http://${HOST}:${PORT}/v1}"
+BASE_URL="${TEST_ANTHROPIC_BASE_URL:-http://${HOST}:${PORT}}"
 
 SERVER_LOG_DIR="$ROOT_DIR/.tmp"
-SERVER_LOG_FILE="$SERVER_LOG_DIR/coproxy-compat-server.log"
+SERVER_LOG_FILE="$SERVER_LOG_DIR/coproxy-anthropic-compat-server.log"
 SERVER_PID=""
 
 require_cmd() {
@@ -52,8 +51,8 @@ fi
 echo "==> Syncing test dependencies via uv (tests/pyproject.toml)"
 uv sync --project "$TESTS_DIR"
 
-echo "==> Starting coproxy compatibility server"
-cargo run -- serve --host "$HOST" --port "$PORT" --api-surface "$API_SURFACE" --api-key "$API_KEY" --no-auto-login >"$SERVER_LOG_FILE" 2>&1 &
+echo "==> Starting coproxy compatibility server with --anthropic enabled"
+cargo run -- serve --host "$HOST" --port "$PORT" --api-surface chat --anthropic --api-key "$API_KEY" --no-auto-login >"$SERVER_LOG_FILE" 2>&1 &
 SERVER_PID="$!"
 
 echo "==> Waiting for server readiness on http://$HOST:$PORT/healthz"
@@ -72,10 +71,10 @@ if ! curl --silent --fail "http://$HOST:$PORT/healthz" >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "==> Running compatibility tests"
+echo "==> Running Anthropic compatibility tests"
 export TEST_API_KEY="$API_KEY"
-export TEST_API_BASE_URL="$BASE_URL"
+export TEST_ANTHROPIC_BASE_URL="$BASE_URL"
 
-uv run --project "$TESTS_DIR" pytest "$TESTS_DIR" --ignore="$TESTS_DIR/anthropic" "$@"
+uv run --project "$TESTS_DIR" pytest "$TESTS_DIR/anthropic" "$@"
 
-echo "==> Compatibility tests completed"
+echo "==> Anthropic compatibility tests completed"

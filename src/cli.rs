@@ -94,6 +94,11 @@ pub struct ServeArgs {
     /// Stop a running daemon
     #[arg(long)]
     pub stop: bool,
+
+    /// Expose the Anthropic-compatible Messages API (POST /v1/messages).
+    /// Disabled by default; enable to allow Anthropic SDK clients to connect.
+    #[arg(long)]
+    pub anthropic: bool,
 }
 
 #[derive(Debug, Subcommand)]
