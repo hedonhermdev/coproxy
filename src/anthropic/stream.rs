@@ -238,8 +238,8 @@ impl StreamConverter {
         // Final chunk: close any open content blocks, emit tool_use blocks,
         // defer message_delta / message_stop until the optional usage chunk.
         if let Some(reason) = finish_reason {
-            self.stop_reason = map_finish_reason(Some(reason.as_str()))
-                .unwrap_or_else(|| "end_turn".to_string());
+            self.stop_reason =
+                map_finish_reason(Some(reason.as_str())).unwrap_or_else(|| "end_turn".to_string());
 
             if self.in_thinking {
                 events.push(AnthropicEvent {
