@@ -6,6 +6,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::Mutex;
 
 const GITHUB_API_KEY_URL: &str = "https://api.github.com/copilot_internal/v2/token";
@@ -155,7 +156,7 @@ impl GhcpProvider {
         match self.fetch_models_from_upstream().await {
             Ok((models, _)) => Ok(merge_with_default(models, default_model)),
             Err(error) => {
-                tracing::warn!("Falling back to static model catalog: {}", error);
+                tracing::warn!(error = %error, "falling back to static model catalog");
                 Ok(self.model_catalog(default_model))
             }
         }
@@ -172,6 +173,50 @@ impl GhcpProvider {
         Ok(details)
     }
 
+    /// Resolve `requested` to a canonical catalog id (longest-prefix match on
+    /// dot/dash-normalized names — e.g. `claude-haiku-4-5-20251001` →
+    /// `claude-haiku-4.5`) and return its advertised `supported_endpoints`.
+    ///
+    /// One catalog lock per call so that callers don't double-walk the cache.
+    /// Falls back to `(requested, None)` when the catalog can't be loaded or
+    /// the model isn't present (private aliases, offline scenarios).
+    pub async fn resolve_model_and_endpoints(
+        &self,
+        requested: &str,
+    ) -> (String, Option<Vec<String>>) {
+        let trimmed = requested.trim();
+        if trimmed.is_empty() {
+            return (requested.to_string(), None);
+        }
+
+        let details = match self.list_model_details().await {
+            Ok(details) => details,
+            Err(error) => {
+                tracing::debug!(error = %error, "model resolve: catalog fetch failed");
+                return (requested.to_string(), None);
+            }
+        };
+
+        let canonical = lpm_resolve(trimmed, details.iter().map(|d| d.id.as_str()))
+            .unwrap_or_else(|| requested.to_string());
+        if canonical != trimmed {
+            tracing::debug!(requested = trimmed, resolved = %canonical, "model alias resolved via LPM");
+        }
+
+        let endpoints = details
+            .iter()
+            .find(|d| d.id == canonical)
+            .and_then(|d| d.raw.get("supported_endpoints"))
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            });
+
+        (canonical, endpoints)
+    }
+
     async fn cached_models_if_fresh(&self) -> Option<(Vec<String>, Vec<ModelDetails>)> {
         let lock = self.cached_model_list.lock().await;
         let cached = lock.as_ref()?;
@@ -182,6 +227,7 @@ impl GhcpProvider {
         Some((cached.models.clone(), cached.details.clone()))
     }
 
+    #[tracing::instrument(level = "debug", skip(self))]
     async fn fetch_models_from_upstream(
         &self,
     ) -> Result<(Vec<String>, Vec<ModelDetails>), ProviderError> {
@@ -200,9 +246,13 @@ impl GhcpProvider {
             req = req.header(header, value);
         }
 
+        let started = Instant::now();
         let response = req.send().await.map_err(|error| {
+            tracing::error!(error = %error, "GHCP models request transport error");
             ProviderError::Upstream(format!("failed calling GHCP models endpoint: {error}"))
         })?;
+        let latency_ms = started.elapsed().as_millis() as u64;
+        tracing::debug!(status = %response.status(), latency_ms, "upstream models response");
 
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
             || response.status() == reqwest::StatusCode::FORBIDDEN
@@ -216,6 +266,7 @@ impl GhcpProvider {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
+            tracing::error!(status = %status, body = %sanitize_error_body(&body), "GHCP models request failed");
             return Err(ProviderError::Upstream(format!(
                 "GHCP models request failed ({status}): {}",
                 sanitize_error_body(&body)
@@ -226,6 +277,7 @@ impl GhcpProvider {
             .json::<UpstreamModelsResponse>()
             .await
             .map_err(|error| {
+                tracing::error!(error = %error, "GHCP models parse error");
                 ProviderError::Upstream(format!("failed parsing GHCP models response: {error}"))
             })?;
 
@@ -259,21 +311,26 @@ impl GhcpProvider {
             fetched_at: now,
         });
 
+        tracing::debug!(count = details.len(), "model catalog refreshed");
+
         Ok((models, details))
     }
 
+    #[tracing::instrument(level = "debug", skip(self), fields(allow_login = allow_device_login))]
     async fn resolve_ghcp_token(&self, allow_device_login: bool) -> anyhow::Result<CachedToken> {
         let mut lock = self.cached_ghcp_token.lock().await;
 
         if let Some(cached) = lock.as_ref()
             && is_token_fresh(cached.expires_at)
         {
+            tracing::debug!("ghcp token cache: hit (memory)");
             return Ok(cached.clone());
         }
 
         if let Some(stored) = self.store.load_ghcp_token().await?
             && is_token_fresh(stored.expires_at)
         {
+            tracing::debug!("ghcp token cache: hit (disk)");
             let cached = CachedToken {
                 token: stored.token,
                 expires_at: stored.expires_at,
@@ -283,6 +340,7 @@ impl GhcpProvider {
             return Ok(cached);
         }
 
+        tracing::debug!("ghcp token cache: miss; refreshing");
         let github_access_token = self.resolve_github_access_token(allow_device_login).await?;
         let exchanged = self.exchange_github_for_ghcp(&github_access_token).await?;
         let endpoint = exchanged
@@ -353,6 +411,11 @@ impl GhcpProvider {
             {
                 self.store.delete_github_token().await.ok();
             }
+            tracing::error!(
+                status = %status,
+                body = %sanitize_error_body(&body),
+                "GitHub→GHCP token exchange failed",
+            );
             anyhow::bail!(
                 "failed to exchange GitHub token for GHCP token ({status}): {}",
                 sanitize_error_body(&body)
@@ -363,6 +426,7 @@ impl GhcpProvider {
         Ok(parsed)
     }
 
+    #[tracing::instrument(level = "debug", skip(self, request, creds), fields(model = %model))]
     async fn chat_once(
         &self,
         request: &CreateChatCompletionRequest,
@@ -391,9 +455,13 @@ impl GhcpProvider {
             req = req.header(header, value);
         }
 
+        let started = Instant::now();
         let response = req.send().await.map_err(|error| {
+            tracing::error!(error = %error, "GHCP chat transport error");
             ProviderError::Upstream(format!("failed calling GHCP chat endpoint: {error}"))
         })?;
+        let latency_ms = started.elapsed().as_millis() as u64;
+        tracing::debug!(status = %response.status(), latency_ms, "upstream chat response");
 
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
             || response.status() == reqwest::StatusCode::FORBIDDEN
@@ -407,10 +475,13 @@ impl GhcpProvider {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            let message = format!(
-                "GHCP chat completion failed ({status}): {}",
-                sanitize_error_body(&body)
-            );
+            let sanitized = sanitize_error_body(&body);
+            if status.is_client_error() {
+                tracing::warn!(status = %status, body = %sanitized, "GHCP chat 4xx");
+            } else {
+                tracing::error!(status = %status, body = %sanitized, "GHCP chat upstream failed");
+            }
+            let message = format!("GHCP chat completion failed ({status}): {sanitized}");
             if status.is_client_error() {
                 return Err(ProviderError::BadRequest(message));
             }
@@ -421,6 +492,7 @@ impl GhcpProvider {
             .json::<UpstreamChatResponse>()
             .await
             .map_err(|error| {
+                tracing::error!(error = %error, "GHCP chat parse error");
                 ProviderError::Upstream(format!("failed parsing GHCP response: {error}"))
             })?;
 
@@ -443,6 +515,7 @@ impl GhcpProvider {
         })
     }
 
+    #[tracing::instrument(level = "debug", skip(self, request, creds), fields(model = ?request.model.as_deref()))]
     async fn stream_once(
         &self,
         request: &CreateChatCompletionRequest,
@@ -464,9 +537,13 @@ impl GhcpProvider {
         }
         req = req.header("Accept", "text/event-stream");
 
+        let started = Instant::now();
         let response = req.send().await.map_err(|error| {
+            tracing::error!(error = %error, "GHCP stream transport error");
             ProviderError::Upstream(format!("failed calling GHCP chat endpoint: {error}"))
         })?;
+        let latency_ms = started.elapsed().as_millis() as u64;
+        tracing::debug!(status = %response.status(), latency_ms, "upstream stream response");
 
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
             || response.status() == reqwest::StatusCode::FORBIDDEN
@@ -480,10 +557,13 @@ impl GhcpProvider {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            let message = format!(
-                "GHCP chat completion stream failed ({status}): {}",
-                sanitize_error_body(&body)
-            );
+            let sanitized = sanitize_error_body(&body);
+            if status.is_client_error() {
+                tracing::warn!(status = %status, body = %sanitized, "GHCP stream 4xx");
+            } else {
+                tracing::error!(status = %status, body = %sanitized, "GHCP stream upstream failed");
+            }
+            let message = format!("GHCP chat completion stream failed ({status}): {sanitized}");
             if status.is_client_error() {
                 return Err(ProviderError::BadRequest(message));
             }
@@ -493,6 +573,7 @@ impl GhcpProvider {
         Ok(response)
     }
 
+    #[tracing::instrument(level = "debug", skip(self, request, creds))]
     async fn create_response_once(
         &self,
         request: &Value,
@@ -517,9 +598,13 @@ impl GhcpProvider {
             req = req.header("Accept", "text/event-stream");
         }
 
+        let started = Instant::now();
         let response = req.send().await.map_err(|error| {
+            tracing::error!(error = %error, "GHCP responses transport error");
             ProviderError::Upstream(format!("failed calling GHCP responses endpoint: {error}"))
         })?;
+        let latency_ms = started.elapsed().as_millis() as u64;
+        tracing::debug!(status = %response.status(), latency_ms, "upstream responses response");
 
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
             || response.status() == reqwest::StatusCode::FORBIDDEN
@@ -533,6 +618,7 @@ impl GhcpProvider {
         Ok(response)
     }
 
+    #[tracing::instrument(level = "debug", skip(self, creds), fields(response_id = %response_id))]
     async fn get_response_once(
         &self,
         response_id: &str,
@@ -549,9 +635,13 @@ impl GhcpProvider {
             req = req.header(header, value);
         }
 
+        let started = Instant::now();
         let response = req.send().await.map_err(|error| {
+            tracing::error!(error = %error, "GHCP get-response transport error");
             ProviderError::Upstream(format!("failed calling GHCP responses endpoint: {error}"))
         })?;
+        let latency_ms = started.elapsed().as_millis() as u64;
+        tracing::debug!(status = %response.status(), latency_ms, "upstream get-response response");
 
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
             || response.status() == reqwest::StatusCode::FORBIDDEN
@@ -580,6 +670,7 @@ impl GhcpProvider {
         match self.create_response_once(&request, &creds).await {
             Ok(response) => Ok(response),
             Err(ProviderError::Unauthorized(_)) => {
+                tracing::warn!("GHCP 401/403 — refreshing token and retrying once");
                 let refreshed = self
                     .resolve_ghcp_token(false)
                     .await
@@ -603,6 +694,7 @@ impl GhcpProvider {
         match self.get_response_once(response_id, raw_query, &creds).await {
             Ok(response) => Ok(response),
             Err(ProviderError::Unauthorized(_)) => {
+                tracing::warn!("GHCP 401/403 — refreshing token and retrying once");
                 let refreshed = self
                     .resolve_ghcp_token(false)
                     .await
@@ -639,6 +731,7 @@ impl GhcpProvider {
         match self.stream_once(&request, &creds).await {
             Ok(response) => Ok(response),
             Err(ProviderError::Unauthorized(_)) => {
+                tracing::warn!("GHCP 401/403 — refreshing token and retrying once");
                 let refreshed = self
                     .resolve_ghcp_token(false)
                     .await
@@ -686,6 +779,7 @@ impl ModelProvider for GhcpProvider {
         match self.chat_once(&request, &model, &creds).await {
             Ok(response) => Ok(response),
             Err(ProviderError::Unauthorized(_)) => {
+                tracing::warn!("GHCP 401/403 — refreshing token and retrying once");
                 let refreshed = self
                     .resolve_ghcp_token(false)
                     .await
@@ -695,6 +789,43 @@ impl ModelProvider for GhcpProvider {
             Err(other) => Err(other),
         }
     }
+}
+
+/// Normalize a model name for prefix comparison: lowercase + treat `.` and `-`
+/// as the same separator. So `claude-haiku-4.5` and `claude-haiku-4-5` compare
+/// equal, which is what callers using either spelling expect.
+fn normalize_model_name(s: &str) -> String {
+    s.trim().to_ascii_lowercase().replace('.', "-")
+}
+
+/// Pick the catalog entry that is the longest prefix of `requested` under
+/// `normalize_model_name`. The match must end on a segment boundary (the
+/// requested suffix is empty or starts with `-`), so `claude-3` does not
+/// hijack `claude-3.5-sonnet`.
+fn lpm_resolve<'a, I>(requested: &str, candidates: I) -> Option<String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let target = normalize_model_name(requested);
+    if target.is_empty() {
+        return None;
+    }
+    let mut best: Option<(usize, &str)> = None;
+    for candidate in candidates {
+        let normalized = normalize_model_name(candidate);
+        if normalized.is_empty() || !target.starts_with(&normalized) {
+            continue;
+        }
+        let rest = &target[normalized.len()..];
+        if !rest.is_empty() && !rest.starts_with('-') {
+            continue;
+        }
+        let len = normalized.len();
+        if best.is_none_or(|(l, _)| len > l) {
+            best = Some((len, candidate));
+        }
+    }
+    best.map(|(_, c)| c.to_string())
 }
 
 fn resolve_model(request_model: Option<&str>, default_model: Option<&str>) -> String {
@@ -724,7 +855,7 @@ fn copilot_headers() -> [(&'static str, &'static str); 4] {
     ]
 }
 
-fn sanitize_error_body(body: &str) -> String {
+pub(crate) fn sanitize_error_body(body: &str) -> String {
     let trimmed = body.trim();
     if trimmed.is_empty() {
         return "empty body".to_string();
@@ -803,4 +934,63 @@ fn merge_with_default(mut models: Vec<String>, default_model: Option<&str>) -> V
     models.sort();
     models.dedup();
     models
+}
+
+#[cfg(test)]
+mod lpm_tests {
+    use super::lpm_resolve;
+
+    const CATALOG: &[&str] = &["claude-3.5-sonnet", "claude-haiku-4.5", "gpt-4o", "gpt-4.1"];
+
+    #[test]
+    fn dashed_request_resolves_to_dotted_catalog_entry() {
+        // Headline case: anthropic-style dated name → GHCP catalog id.
+        assert_eq!(
+            lpm_resolve("claude-haiku-4-5-20251001", CATALOG.iter().copied()).as_deref(),
+            Some("claude-haiku-4.5"),
+        );
+        assert_eq!(
+            lpm_resolve("claude-3-5-sonnet-20241022", CATALOG.iter().copied()).as_deref(),
+            Some("claude-3.5-sonnet"),
+        );
+    }
+
+    #[test]
+    fn exact_match_returns_canonical() {
+        assert_eq!(
+            lpm_resolve("claude-haiku-4.5", CATALOG.iter().copied()).as_deref(),
+            Some("claude-haiku-4.5"),
+        );
+    }
+
+    #[test]
+    fn no_match_returns_none() {
+        assert_eq!(lpm_resolve("o3-mini", CATALOG.iter().copied()), None);
+        assert_eq!(lpm_resolve("", CATALOG.iter().copied()), None);
+    }
+
+    #[test]
+    fn requires_segment_boundary() {
+        // `claude-3` would match `claude-3.5-sonnet` if we forgot the boundary
+        // check — `claude-3xyz` must not.
+        let cat = ["claude-3", "claude-3.5-sonnet"];
+        assert_eq!(lpm_resolve("claude-3xyz", cat.iter().copied()), None);
+        assert_eq!(
+            lpm_resolve("claude-3-5-sonnet-foo", cat.iter().copied()).as_deref(),
+            Some("claude-3.5-sonnet"),
+        );
+        assert_eq!(
+            lpm_resolve("claude-3-something", cat.iter().copied()).as_deref(),
+            Some("claude-3"),
+        );
+    }
+
+    #[test]
+    fn picks_longest_prefix() {
+        let cat = ["claude", "claude-haiku", "claude-haiku-4.5"];
+        assert_eq!(
+            lpm_resolve("claude-haiku-4-5-20251001", cat.iter().copied()).as_deref(),
+            Some("claude-haiku-4.5"),
+        );
+    }
 }

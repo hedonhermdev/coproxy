@@ -10,15 +10,32 @@ use axum::response::Response;
 pub async fn create_response(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(_payload): Json<serde_json::Value>,
+    Json(payload): Json<serde_json::Value>,
 ) -> Result<Response, ApiError> {
     auth::authorize(&headers, state.api_key.as_deref())?;
 
+    let stream_flag = payload
+        .get("stream")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let model = payload
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let span = tracing::Span::current();
+    span.record("stream", stream_flag);
+    if let Some(m) = model.as_deref() {
+        span.record("model", m);
+    }
+    tracing::debug!(model = ?model, stream = stream_flag, "responses dispatch");
+
     let upstream = state
         .provider
-        .create_response(_payload, state.default_model.as_deref())
+        .create_response(payload, state.default_model.as_deref())
         .await
         .map_err(ApiError::from_provider_error)?;
+
+    tracing::debug!(status = %upstream.status(), "responses upstream returned");
 
     Ok(proxy_upstream_response(upstream))
 }
@@ -31,11 +48,15 @@ pub async fn get_response(
 ) -> Result<Response, ApiError> {
     auth::authorize(&headers, state.api_key.as_deref())?;
 
+    tracing::debug!(response_id = %response_id, "get response dispatch");
+
     let upstream = state
         .provider
         .get_response(&response_id, raw_query.as_deref())
         .await
         .map_err(ApiError::from_provider_error)?;
+
+    tracing::debug!(status = %upstream.status(), "get response upstream returned");
 
     Ok(proxy_upstream_response(upstream))
 }

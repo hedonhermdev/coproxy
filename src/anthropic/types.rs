@@ -8,7 +8,7 @@ use serde_json::Value;
 /// `messages`, `system`, `tools`, and `tool_choice` because Anthropic's content
 /// block schema is open-ended (text, image, tool_use, tool_result, thinking,
 /// document, ...) and we want to forward unknown shapes rather than reject.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CreateMessageRequest {
     #[serde(default)]
     pub model: Option<String>,

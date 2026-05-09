@@ -96,7 +96,7 @@ pub fn map_finish_reason(finish_reason: Option<&str>) -> Option<String> {
     })
 }
 
-fn flatten_system(system: Option<&Value>) -> Option<String> {
+pub(crate) fn flatten_system(system: Option<&Value>) -> Option<String> {
     let value = system?;
     match value {
         Value::String(s) => Some(s.clone()),
@@ -383,6 +383,6 @@ fn convert_tool_choice(choice: &Value) -> Option<ChatCompletionToolChoiceOption>
     }
 }
 
-fn stringify(value: &Value) -> String {
+pub(crate) fn stringify(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_default()
 }

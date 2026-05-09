@@ -11,6 +11,7 @@ pub async fn create_embeddings(
     Json(_request): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     auth::authorize(&headers, state.api_key.as_deref())?;
+    tracing::debug!("embeddings requested but not supported");
     Err(ApiError::not_supported(
         "embeddings are not implemented for GHCP provider",
     ))

@@ -4,8 +4,13 @@ use crate::cli::ApiSurface;
 use crate::provider::ghcp::GhcpProvider;
 use crate::state::AppState;
 use axum::Router;
+use axum::http::{HeaderName, Request, Response};
+use std::time::Duration;
 use tokio::net::TcpListener;
-use tracing::info;
+use tower::ServiceBuilder;
+use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
+use tower_http::trace::{DefaultOnFailure, TraceLayer};
+use tracing::{Level, Span, field, info};
 
 #[derive(Debug)]
 pub struct ServerConfig {
@@ -25,9 +30,14 @@ pub async fn run(config: ServerConfig, provider: GhcpProvider) -> anyhow::Result
     let bind_addr = format!("{}:{}", config.host, config.port);
     let listener = TcpListener::bind(&bind_addr).await?;
     let local_addr = listener.local_addr()?;
+    let api_label = if config.anthropic_enabled {
+        "Anthropic"
+    } else {
+        "OpenAI-compatible"
+    };
     info!(
-        "GHCP OpenAI-compatible server listening on http://{}",
-        local_addr
+        "GHCP {} server listening on http://{}",
+        api_label, local_addr
     );
 
     axum::serve(listener, app)
@@ -78,7 +88,42 @@ fn app_router(api_surface: ApiSurface, anthropic_enabled: bool, state: AppState)
         );
     }
 
-    app.with_state(state)
+    let request_id_header = HeaderName::from_static("x-request-id");
+    let middleware = ServiceBuilder::new()
+        .layer(SetRequestIdLayer::new(
+            request_id_header.clone(),
+            MakeRequestUuid,
+        ))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(|req: &Request<_>| {
+                    let request_id = req
+                        .headers()
+                        .get("x-request-id")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("-");
+                    tracing::info_span!(
+                        "http_request",
+                        method = %req.method(),
+                        path = %req.uri().path(),
+                        request_id = %request_id,
+                        status = field::Empty,
+                        latency_ms = field::Empty,
+                        model = field::Empty,
+                        stream = field::Empty,
+                    )
+                })
+                .on_request(|_: &Request<_>, _: &Span| {})
+                .on_response(|resp: &Response<_>, latency: Duration, span: &Span| {
+                    span.record("status", resp.status().as_u16());
+                    span.record("latency_ms", latency.as_millis() as u64);
+                    tracing::info!(target: "coproxy::access", "request complete");
+                })
+                .on_failure(DefaultOnFailure::new().level(Level::ERROR)),
+        )
+        .layer(PropagateRequestIdLayer::new(request_id_header));
+
+    app.layer(middleware).with_state(state)
 }
 
 async fn shutdown_signal() {

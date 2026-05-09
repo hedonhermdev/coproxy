@@ -17,6 +17,8 @@ pub async fn list_models(
         .await
         .map_err(ApiError::from_provider_error)?;
 
+    tracing::debug!(count = model_ids.len(), "list models ok");
+
     let now = chrono::Utc::now().timestamp();
     let data = model_ids
         .into_iter()
@@ -40,12 +42,16 @@ pub async fn get_model(
 ) -> Result<Json<Model>, ApiError> {
     auth::authorize(&headers, state.api_key.as_deref())?;
 
+    tracing::Span::current().record("model", model.as_str());
+
     let known = state
         .provider
         .list_available_models(state.default_model.as_deref())
         .await
         .map_err(ApiError::from_provider_error)?;
-    if !known.iter().any(|item| item == &model) {
+    let found = known.iter().any(|item| item == &model);
+    tracing::debug!(model = %model, found, "get model");
+    if !found {
         return Err(ApiError::not_found(format!("model not found: {model}")));
     }
 

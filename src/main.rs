@@ -13,7 +13,13 @@ async fn main() -> anyhow::Result<()> {
     let env_filter = EnvFilter::try_from_default_env()
         .or_else(|_| EnvFilter::try_new(cli.log_level.clone()))
         .unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt().with_env_filter(env_filter).init();
+    let stderr_is_tty = std::io::stderr().is_terminal();
+    tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_target(true)
+        .with_ansi(stderr_is_tty)
+        .with_writer(std::io::stderr)
+        .init();
 
     let store = TokenStore::new(cli.state_dir.clone())?;
 

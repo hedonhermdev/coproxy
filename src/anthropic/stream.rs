@@ -313,6 +313,11 @@ impl StreamConverter {
         events
     }
 
+    /// Final input/output token counts as observed from the upstream usage chunk.
+    pub fn token_usage(&self) -> (u64, u64) {
+        (self.input_tokens, self.output_tokens)
+    }
+
     /// Emit deferred message_delta + message_stop. Idempotent.
     pub fn finish(&mut self) -> Vec<AnthropicEvent> {
         if !self.pending_finish && self.started {
@@ -351,13 +356,18 @@ pub fn anthropic_event_stream(
     model: String,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> {
     let mut bytes_stream = upstream.bytes_stream();
+    let span = tracing::Span::current();
     async_stream::try_stream! {
         let mut converter = StreamConverter::new(model);
         let mut buffer: Vec<u8> = Vec::with_capacity(8192);
         let mut done_marker_seen = false;
+        let mut chunks: u64 = 0;
+        let mut events_emitted: u64 = 0;
 
         while let Some(item) = bytes_stream.next().await {
             let chunk = item.map_err(std::io::Error::other)?;
+            chunks += 1;
+            tracing::trace!(chunk_size = chunk.len(), "sse byte chunk");
             buffer.extend_from_slice(&chunk);
 
             // Drain complete events delimited by \n\n.
@@ -375,6 +385,7 @@ pub fn anthropic_event_stream(
                     if payload == "[DONE]" {
                         done_marker_seen = true;
                         for ev in converter.finish() {
+                            events_emitted += 1;
                             yield ev.to_sse_bytes();
                         }
                         continue;
@@ -383,6 +394,7 @@ pub fn anthropic_event_stream(
                         continue;
                     };
                     for ev in converter.process_chunk(&value) {
+                        events_emitted += 1;
                         yield ev.to_sse_bytes();
                     }
                 }
@@ -398,6 +410,7 @@ pub fn anthropic_event_stream(
                 && let Ok(value) = serde_json::from_str::<Value>(payload)
             {
                 for ev in converter.process_chunk(&value) {
+                    events_emitted += 1;
                     yield ev.to_sse_bytes();
                 }
             }
@@ -405,12 +418,23 @@ pub fn anthropic_event_stream(
 
         if !done_marker_seen {
             for ev in converter.finish() {
+                events_emitted += 1;
                 yield ev.to_sse_bytes();
             }
         }
+
+        let (input_tokens, output_tokens) = converter.token_usage();
+        let _e = span.enter();
+        tracing::debug!(
+            chunks,
+            events = events_emitted,
+            input_tokens,
+            output_tokens,
+            "anthropic stream complete"
+        );
     }
 }
 
-fn find_double_newline(buf: &[u8]) -> Option<usize> {
+pub(crate) fn find_double_newline(buf: &[u8]) -> Option<usize> {
     buf.windows(2).position(|w| w == b"\n\n")
 }
