@@ -10,16 +10,21 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let env_filter = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new(cli.log_level.clone()))
-        .unwrap_or_else(|_| EnvFilter::new("info"));
-    let stderr_is_tty = std::io::stderr().is_terminal();
-    tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .with_target(true)
-        .with_ansi(stderr_is_tty)
-        .with_writer(std::io::stderr)
-        .init();
+    // `coproxy claude` shares stderr with the child `claude` TUI; any log
+    // output corrupts the terminal. Skip subscriber init entirely in that
+    // path — anyhow errors still bubble up through main's return value.
+    if !matches!(cli.command, Command::Claude(_)) {
+        let env_filter = EnvFilter::try_from_default_env()
+            .or_else(|_| EnvFilter::try_new(cli.log_level.clone()))
+            .unwrap_or_else(|_| EnvFilter::new("info"));
+        let stderr_is_tty = std::io::stderr().is_terminal();
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .with_target(true)
+            .with_ansi(stderr_is_tty)
+            .with_writer(std::io::stderr)
+            .init();
+    }
 
     let store = TokenStore::new(cli.state_dir.clone())?;
 
@@ -274,8 +279,6 @@ async fn run_claude(
 
     // Start the server in the background on the pre-bound listener.
     let server_task = tokio::spawn(async move { serve_on_listener(cfg, provider, listener).await });
-
-    eprintln!("coproxy: serving Anthropic API at {base_url}");
 
     let status = TokioCmd::new("claude")
         .args(&args.claude_args)
