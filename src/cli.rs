@@ -28,6 +28,8 @@ pub enum Command {
         #[command(subcommand)]
         command: AuthCommand,
     },
+    /// Launch `claude` routed through this proxy (sets ANTHROPIC_BASE_URL/API_KEY)
+    Claude(ClaudeArgs),
     /// List available models
     Models {
         /// Output as JSON array
@@ -99,6 +101,13 @@ pub struct ServeArgs {
     /// Disabled by default; enable to allow Anthropic SDK clients to connect.
     #[arg(long)]
     pub anthropic: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ClaudeArgs {
+    /// Arguments forwarded verbatim to `claude`
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub claude_args: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]

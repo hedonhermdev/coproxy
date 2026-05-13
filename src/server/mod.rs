@@ -24,11 +24,23 @@ pub struct ServerConfig {
 }
 
 pub async fn run(config: ServerConfig, provider: GhcpProvider) -> anyhow::Result<()> {
+    let bind_addr = format!("{}:{}", config.host, config.port);
+    let listener = TcpListener::bind(&bind_addr).await?;
+    serve_on_listener(config, provider, listener).await
+}
+
+/// Variant of `run` that takes a pre-bound `TcpListener`. Useful when the
+/// caller needs to know the actual bound address before the server starts
+/// accepting (e.g. wrapping a child process whose env vars must point at
+/// the server).
+pub async fn serve_on_listener(
+    config: ServerConfig,
+    provider: GhcpProvider,
+    listener: TcpListener,
+) -> anyhow::Result<()> {
     let state = AppState::new(provider, config.api_key, config.default_model);
     let app = app_router(config.api_surface, config.anthropic_enabled, state);
 
-    let bind_addr = format!("{}:{}", config.host, config.port);
-    let listener = TcpListener::bind(&bind_addr).await?;
     let local_addr = listener.local_addr()?;
     let api_label = if config.anthropic_enabled {
         "Anthropic"

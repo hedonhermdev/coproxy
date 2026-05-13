@@ -1,8 +1,8 @@
 use clap::Parser;
 use coproxy::auth::token_store::TokenStore;
-use coproxy::cli::{AuthCommand, Cli, Command};
+use coproxy::cli::{ApiSurface, AuthCommand, Cli, ClaudeArgs, Command};
 use coproxy::provider::ghcp::{GhcpProvider, ModelDetails};
-use coproxy::server::{ServerConfig, run};
+use coproxy::server::{ServerConfig, run, serve_on_listener};
 use std::io::IsTerminal;
 use tracing_subscriber::EnvFilter;
 
@@ -45,6 +45,9 @@ async fn main() -> anyhow::Result<()> {
                     println!("Logged out (local tokens removed).");
                 }
             }
+        }
+        Command::Claude(args) => {
+            run_claude(args, store, cli.github_token).await?;
         }
         Command::Models { json, verbose } => {
             let provider = GhcpProvider::new(store, cli.github_token);
@@ -227,6 +230,78 @@ fn stop_daemon(store: &TokenStore) -> anyhow::Result<()> {
     }
 }
 
+use anyhow::Context;
+
+/// Launch `claude` with an in-process Anthropic-compatible proxy.
+///
+/// Spins up the proxy as a tokio task (so it serves /v1/messages alongside),
+/// then runs `claude` as a child process with ANTHROPIC_BASE_URL and
+/// ANTHROPIC_API_KEY pointed at it. When `claude` exits, the proxy is shut
+/// down and the process exits with claude's status code.
+async fn run_claude(
+    args: ClaudeArgs,
+    store: TokenStore,
+    github_token: Option<String>,
+) -> anyhow::Result<()> {
+    use std::process::Stdio;
+    use tokio::process::Command as TokioCmd;
+
+    let provider = GhcpProvider::new(store, github_token);
+    let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    provider.ensure_ready(interactive).await?;
+
+    // The proxy is loopback-only and lives for the duration of one child
+    // process, so the api_key is just a sanity-check token — generate one
+    // internally instead of asking the user for it.
+    let api_key = format!("coproxy-{}", uuid::Uuid::new_v4());
+
+    let cfg = ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0,
+        api_surface: ApiSurface::Chat,
+        api_key: Some(api_key.clone()),
+        default_model: None,
+        anthropic_enabled: true,
+    };
+
+    // Bind loopback on an OS-assigned port — the proxy is for the child
+    // process we're about to spawn, nothing else needs to reach it.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("failed to bind 127.0.0.1:0")?;
+    let local_addr = listener.local_addr()?;
+    let base_url = format!("http://{}", local_addr);
+
+    // Start the server in the background on the pre-bound listener.
+    let server_task = tokio::spawn(async move { serve_on_listener(cfg, provider, listener).await });
+
+    eprintln!("coproxy: serving Anthropic API at {base_url}");
+
+    let status = TokioCmd::new("claude")
+        .args(&args.claude_args)
+        .env("ANTHROPIC_BASE_URL", &base_url)
+        .env("ANTHROPIC_API_KEY", &api_key)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .await
+        .context("failed to spawn `claude` — is it installed and on PATH?")?;
+
+    // Tear the server down. abort() is sufficient since the proxy holds no
+    // durable state and any in-flight requests came from the child we just
+    // reaped.
+    server_task.abort();
+    match server_task.await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(e.context("proxy server exited with error")),
+        Err(join_err) if join_err.is_cancelled() => {}
+        Err(join_err) => return Err(anyhow::anyhow!("proxy server task panicked: {join_err}")),
+    }
+
+    std::process::exit(status.code().unwrap_or(1));
+}
+
 fn pid_file_path(store: &TokenStore) -> std::path::PathBuf {
     store
         .root_dir()
@@ -234,8 +309,6 @@ fn pid_file_path(store: &TokenStore) -> std::path::PathBuf {
         .map(|p| p.join("coproxy.pid"))
         .unwrap_or_else(|| store.root_dir().join("coproxy.pid"))
 }
-
-use anyhow::Context;
 
 /// Render a single model's details to stdout in a human-readable block.
 /// Prefers well-known GHCP fields (vendor, version, capabilities.limits,
