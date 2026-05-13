@@ -11,6 +11,7 @@
 - Auth lifecycle: `cargo run -- auth login`, `cargo run -- auth status`, `cargo run -- auth logout`
 - Model listing CLI: `cargo run -- models --json`
 - Focused verification: `cargo fmt --all -- --check`, `cargo clippy --all-targets`, `cargo test`, `cargo check`
+- **Always run `cargo fmt --all` before committing.** CI runs `cargo fmt --all -- --check` and will fail the build on any diff — including trivial things like alphabetized imports inside a `use foo::{...}` group. `cargo build` does NOT format; rustfmt has to be invoked explicitly.
 - OpenAI compatibility tests: `scripts/run-openai-compat-tests.sh` (requires `uv` and GHCP auth)
 - Current state: there are no Rust tests yet (`cargo test` runs 0 tests). Python compatibility tests live in `tests/`.
 

@@ -1,6 +1,6 @@
 use clap::Parser;
 use coproxy::auth::token_store::TokenStore;
-use coproxy::cli::{ApiSurface, AuthCommand, Cli, ClaudeArgs, Command};
+use coproxy::cli::{ApiSurface, AuthCommand, ClaudeArgs, Cli, Command};
 use coproxy::provider::ghcp::{GhcpProvider, ModelDetails};
 use coproxy::server::{ServerConfig, run, serve_on_listener};
 use std::io::IsTerminal;
